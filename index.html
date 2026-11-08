@@ -1,0 +1,431 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Ball Run 2048 Co-op</title>
+<style>
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: #10131c;
+  color: white;
+  font-family: system-ui, sans-serif;
+  overflow: hidden;
+}
+
+#app {
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  padding: 12px;
+  gap: 10px;
+}
+
+header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+h1 { font-size: 20px; }
+
+.panel {
+  background: #1b2030;
+  border: 1px solid #343c52;
+  border-radius: 15px;
+  padding: 15px;
+}
+
+input, button {
+  width: 100%;
+  padding: 13px;
+  border-radius: 12px;
+  border: 1px solid #343c52;
+  font-size: 15px;
+  margin: 5px 0;
+}
+
+input {
+  background: #0e1119;
+  color: white;
+}
+
+button {
+  background: #d9f45b;
+  color: #15180d;
+  font-weight: bold;
+}
+
+.secondary {
+  background: #293149;
+  color: white;
+}
+
+#game {
+  display: none;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.stats {
+  display: flex;
+  gap: 8px;
+}
+
+.stat {
+  flex: 1;
+  padding: 10px;
+  background: #1b2030;
+  border-radius: 12px;
+  text-align: center;
+}
+
+.stat b {
+  display: block;
+  font-size: 22px;
+}
+
+#stage {
+  flex: 1;
+  min-height: 0;
+  border-radius: 18px;
+  overflow: hidden;
+  background: #151b2a;
+}
+
+canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+  touch-action: pan-y;
+}
+
+.controls {
+  display: flex;
+  gap: 12px;
+}
+
+.controls button {
+  height: 55px;
+  font-size: 24px;
+  background: #293149;
+  color: white;
+}
+</style>
+</head>
+
+<body>
+<div id="app">
+
+<header>
+  <h1>BALL RUN 2048</h1>
+  <span id="connection">OFFLINE</span>
+</header>
+
+<section id="setup" class="panel">
+  <h2>Co-op Run</h2>
+  <p>Create a room or join your brother.</p>
+
+  <input id="name" placeholder="Player name">
+
+  <input id="supUrl" placeholder="Supabase Project URL">
+  <input id="supKey" placeholder="Supabase anon/public key">
+
+  <button onclick="createRoom()">CREATE ROOM</button>
+  <button class="secondary" onclick="showJoin()">JOIN ROOM</button>
+
+  <div id="joinBox" style="display:none">
+    <input id="roomCode" placeholder="Room code">
+    <button onclick="joinRoom()">JOIN</button>
+  </div>
+
+  <p id="status">Waiting for players...</p>
+</section>
+
+<section id="game">
+
+  <div class="stats">
+    <div class="stat">
+      <span>SHARED BALL</span>
+      <b id="value">2</b>
+    </div>
+    <div class="stat">
+      <span>DISTANCE</span>
+      <b id="distance">0%</b>
+    </div>
+    <div class="stat">
+      <span>PLAYERS</span>
+      <b id="players">1/2</b>
+    </div>
+  </div>
+
+  <div id="stage">
+    <canvas id="canvas"></canvas>
+  </div>
+
+  <div class="controls">
+    <button onclick="move(-1)">←</button>
+    <button onclick="move(1)">→</button>
+  </div>
+
+  <button class="secondary" onclick="restart()">RESTART</button>
+  <button class="secondary" onclick="leave()">LEAVE</button>
+
+</section>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
+<script>
+const $ = id => document.getElementById(id);
+
+let supabaseClient;
+let channel;
+let room = "";
+let isHost = false;
+let playerId = Math.random().toString(36).slice(2,9);
+
+let game = {
+  x: 0,
+  value: 2,
+  distance: 0,
+  seed: Math.random() * 1000,
+  events: [],
+  over: false
+};
+
+function showJoin() {
+  $("joinBox").style.display = "block";
+}
+
+async function connect() {
+  const url = $("supUrl").value.trim();
+  const key = $("supKey").value.trim();
+
+  if (!url || !key) {
+    $("status").textContent = "Enter your Supabase credentials.";
+    return false;
+  }
+
+  supabaseClient = window.supabase.createClient(url, key);
+  return true;
+}
+
+async function createRoom() {
+  if (!await connect()) return;
+
+  room = Math.random().toString(36).slice(2,8).toUpperCase();
+  isHost = true;
+
+  await startRoom();
+  $("status").textContent = "Room code: " + room;
+}
+
+async function joinRoom() {
+  if (!await connect()) return;
+
+  room = $("roomCode").value.trim().toUpperCase();
+  if (room.length !== 6) {
+    $("status").textContent = "Enter a valid room code.";
+    return;
+  }
+
+  isHost = false;
+  await startRoom();
+}
+
+async function startRoom() {
+  channel = supabaseClient.channel("ballrun-" + room);
+
+  channel
+    .on("broadcast", {event:"state"}, ({payload}) => {
+      if (!isHost) {
+        game = payload.state;
+        draw();
+      }
+    })
+    .on("broadcast", {event:"input"}, ({payload}) => {
+      if (isHost) {
+        game.x = Math.max(-1, Math.min(1,
+          game.x + payload.dir * 0.15
+        ));
+      }
+    })
+    .subscribe(async status => {
+      if (status === "SUBSCRIBED") {
+        $("setup").style.display = "none";
+        $("game").style.display = "flex";
+        $("connection").textContent = "ROOM " + room;
+
+        await channel.track({
+          name: $("name").value || "Player"
+        });
+
+        if (isHost) {
+          game = {
+            x: 0,
+            value: 2,
+            distance: 0,
+            seed: Math.random() * 1000,
+            events: [],
+            over: false
+          };
+        }
+
+        resize();
+        requestAnimationFrame(loop);
+      }
+    });
+}
+
+function move(dir) {
+  if (!channel) return;
+
+  if (isHost) {
+    game.x = Math.max(-1, Math.min(1,
+      game.x + dir * 0.15
+    ));
+  } else {
+    channel.send({
+      type: "broadcast",
+      event: "input",
+      payload: {dir}
+    });
+  }
+}
+
+function restart() {
+  if (!isHost) return;
+
+  game = {
+    x: 0,
+    value: 2,
+    distance: 0,
+    seed: Math.random() * 1000,
+    events: [],
+    over: false
+  };
+}
+
+function leave() {
+  if (channel) {
+    supabaseClient.removeChannel(channel);
+  }
+
+  channel = null;
+  $("game").style.display = "none";
+  $("setup").style.display = "block";
+  $("connection").textContent = "OFFLINE";
+}
+
+const canvas = $("canvas");
+const ctx = canvas.getContext("2d");
+
+function resize() {
+  const rect = canvas.getBoundingClientRect();
+  const dpr = Math.min(devicePixelRatio || 1, 2);
+
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+window.addEventListener("resize", resize);
+
+function update() {
+  if (!isHost || game.over) return;
+
+  game.distance += 0.025;
+
+  const segment = Math.floor(game.distance / 5);
+
+  if (segment > game.events.length) {
+    game.events.push(segment);
+    game.value += 2;
+  }
+
+  if (game.distance >= 100) {
+    game.over = true;
+  }
+}
+
+function draw() {
+  const w = canvas.clientWidth;
+  const h = canvas.clientHeight;
+
+  ctx.clearRect(0, 0, w, h);
+
+  const cx = w / 2;
+  const roadW = w * 0.8;
+
+  ctx.fillStyle = "#303b56";
+  ctx.beginPath();
+  ctx.moveTo(cx - roadW * 0.18, 0);
+  ctx.lineTo(cx + roadW * 0.18, 0);
+  ctx.lineTo(cx + roadW * 0.5, h);
+  ctx.lineTo(cx - roadW * 0.5, h);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.strokeStyle = "#64718e";
+  ctx.setLineDash([12,14]);
+  ctx.beginPath();
+  ctx.moveTo(cx, 0);
+  ctx.lineTo(cx, h);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  const x = cx + game.x * roadW * 0.31;
+  const y = h * 0.73;
+  const r = 30;
+
+  const gradient = ctx.createRadialGradient(
+    x-r*.35,y-r*.4,2,x,y,r
+  );
+
+  gradient.addColorStop(0,"#fffbb0");
+  gradient.addColorStop(.4,"#d9f45b");
+  gradient.addColorStop(1,"#819d24");
+
+  ctx.fillStyle = gradient;
+  ctx.beginPath();
+  ctx.arc(x,y,r,0,Math.PI*2);
+  ctx.fill();
+
+  ctx.fillStyle = "#17200b";
+  ctx.font = "bold 20px system-ui";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(game.value,x,y);
+
+  $("value").textContent = game.value;
+  $("distance").textContent = Math.floor(game.distance) + "%";
+}
+
+let lastSend = 0;
+
+function loop(time) {
+  update();
+  draw();
+
+  if (isHost && channel && time-lastSend > 100) {
+    channel.send({
+      type: "broadcast",
+      event: "state",
+      payload: {state:game}
+    });
+    lastSend = time;
+  }
+
+  if ($("game").style.display === "flex") {
+    requestAnimationFrame(loop);
+  }
+}
+</script>
+</body>
+</html>
